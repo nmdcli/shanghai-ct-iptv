@@ -891,7 +891,7 @@ def rtp2httpd_rtsp_catchup_url(timeshift_url: str, base_url: str, catchup_templa
     query = f"{parsed.query}&{seek}" if parsed.query else seek
     return f"{base_url.rstrip('/')}/rtsp/{netloc}{parsed.path}?{query}"
 
-
+# 专门增加了下面的逻辑来归组上海的电视频道，因为仅靠EPG节目源里获得的频道名称无法直接以某个关键字来识别上海的频道。
 # 上海频道关键词（使用播放源返回的频道名）。命中任一关键词，
 # 或名字里含有“上海”/“东方”的频道，全部归入“上海”组。
 # 注：游戏风云/法治天地/金色学堂名字里不含上海、东方，故显式列出。

@@ -54,7 +54,7 @@ DEFAULT_EPG_URL = "http://192.168.50.10/iptv/shctepg.xml"
 上海脚本保留命令行参数，例如：
 
 ```bash
-python3 shctiptv.py --user-id '你的账号@etv1' --sn '你的SN' --mac '你的MAC'
+python3 shctiptv_capture.py --user-id '你的账号@etv1' --sn '你的SN' --mac '你的MAC'
 ```
 
 ## 定时任务示例

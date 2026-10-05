@@ -1,6 +1,6 @@
 # 上海 IPTV 抓取脚本
 
-感谢本项目fork的原作者[pcg兄台的成果](https://github.com/pcg562240/pcg-iptv)。本人仅仅是在MUSE的协助下，在pcg兄台成果的基础上进行了改进。在pcg兄台版本的基础上，在输出的m3u文件里增加了每个频道的logo和FCC信息。此外也多增加了3个不同版本呢的m3u文件，供不同的需求。本人的改动仅仅是对上海电信的脚本。广东的脚本本人不了情当地情况，无法修改。
+感谢本项目fork的原作者[pcg兄台的成果](https://github.com/pcg562240/pcg-iptv)。本人仅仅是在MUSE的协助下，在pcg兄台成果的基础上进行了改进。在pcg兄台版本的基础上，在输出的m3u文件里增加了每个频道的logo和FCC信息。此外也多增加了3个不同版本的m3u文件，供不同的需求。本人的改动仅仅是对上海电信的脚本。广东的脚本本人不了解当地情况，无法修改。
 
 此脚本用于抓取上海电信 IPTV 的频道列表、XMLTV 节目表和回放地址，并生成可给 APTV、TiviMate、Kodi、udpxy、rtp2httpd 等工具使用的 M3U/XMLTV 文件。
 上海电信IPTV要求要有IPTV盒子账号、SN、MAC地址

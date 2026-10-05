@@ -63,9 +63,9 @@ python3 shctiptv_capture.py --user-id '你的账号@etv1' --sn '你的SN' --mac 
 30 4 * * * cd /opt/iptv && /usr/bin/python3 shctiptv_capture.py >/tmp/shctiptv.log 2>&1
 ```
 ## 参考项目
-1、https://github.com/yujincheng08/rust-iptv-proxy
-2、https://github.com/melody0709/cmcc_iptv_auto_py
-3、https://github.com/denymz/sh-tel-iptv-spider
+1、https://github.com/yujincheng08/rust-iptv-proxy \
+2、https://github.com/melody0709/cmcc_iptv_auto_py \
+3、https://github.com/denymz/sh-tel-iptv-spider \
 4、https://github.com/pcg562240/pcg-iptv
 
 

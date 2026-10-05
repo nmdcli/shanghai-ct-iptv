@@ -37,13 +37,13 @@ from xml.sax.saxutils import escape as xml_escape
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 # IPTV 账号，通常是“数字@etv1”。这是模拟盒子鉴权的必要参数。
-DEFAULT_USER_ID = ""
+DEFAULT_USER_ID = "11111111@xxxx"
 
 # IPTV 盒子的 SN/序列号。抓包里的 SN 要和账号、MAC 对应。
-DEFAULT_SN = ""
+DEFAULT_SN = "222222222222222222222222"
 
 # IPTV 盒子的 MAC 地址。格式保持 XX:XX:XX:XX:XX:XX。
-DEFAULT_MAC = ""
+DEFAULT_MAC = "33:33:33:33:33:33"
 
 # 上海电信 IPTV 认证入口。一般不用改，除非抓包发现认证服务器变化。
 DEFAULT_AUTH_HOST = "222.68.208.73:7001"
@@ -52,13 +52,16 @@ DEFAULT_AUTH_HOST = "222.68.208.73:7001"
 DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR)
 
 # 爱快/udpxy 地址，用于生成 shctiptv.m3u 的直播地址。
-DEFAULT_UDPXY = "192.168.50.1:333"
+DEFAULT_UDPXY = "192.168.50.10:4022"
 
 # rtp2httpd 地址，用于生成 shctiptv2.m3u 的直播和 RTSP 回放代理地址。
-DEFAULT_RTP2HTTPD_URL = "http://192.168.50.2:5140"
+DEFAULT_RTP2HTTPD_URL = "http://192.168.50.10:5140"
 
-# 写入 M3U 头部的节目单 URL，需要和静态文件服务地址一致。
-DEFAULT_EPG_URL = "http://192.168.50.2:3333/shctepg.xml"
+# 写入 M3U 头部的节目单 URL，需要和静态文件服务地址一致。建议本机有http服务，讲脚本生成的shctepg.xml文件放进去http服务的相应目录
+DEFAULT_EPG_URL = "http://192.168.50.10/iptv/shctepg.xml"
+
+# FCC地址。这只是其中一个，更多的请见 https://rtp2httpd.com/reference/cn-fcc-collection
+DEFAULT_FCC_POSTFIX = "?fcc=124.75.25.211:7777"
 
 # 回放天数，只影响 M3U 的 catchup-days 标记，不改变电信平台实际可回放范围。
 DEFAULT_CATCHUP_DAYS = "7"
@@ -74,10 +77,19 @@ DEFAULT_CATCHUP_TEMPLATE = "playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"
 # 是否生成 rtp2httpd 版 shctiptv2.m3u。默认生成；可用 --skip-rtp2httpd-m3u 关闭。
 DEFAULT_WRITE_RTP2HTTPD_M3U = True
 
-# 默认输出文件名。
+# 默认输出文件名。可以根据自己的需要变更
 M3U_FILENAME = "shctiptv.m3u"
-RTP2HTTPD_M3U_FILENAME = "shctiptv2.m3u"
+RTP2HTTPD_M3U_FILENAME = "shctiptv_rtp2httpd.m3u"
+M3U_RAW_FILENAME = "shctiptv_raw.m3u"
+RTP2HTTPD_SIMP_M3U_FILENAME = "shctiptv_rtp2httpd_simp.m3u"
+RTP2HTTPD_RAW_M3U_FILENAME = "shctiptv_rtp2httpd_raw.m3u"
 EPG_FILENAME = "shctepg.xml"
+
+# 台标 CDN 基础地址，配置文件里的 logo 文件名拼在这后面。上海的台标见这个项目：https://cdn.jsdelivr.net/gh/ihipop/Shanghai-IPTV@master/tv-logo/
+DEFAULT_LOGO_BASE_URL = "https://cdn.jsdelivr.net/gh/ihipop/Shanghai-IPTV@master/tv-logo/"
+# 台标配置文件名（JSON：{"播放源频道名": "logo文件名"}，没有 logo 的频道值留空）。
+# 相对路径时按脚本所在目录解析，可用 --logo-config 指定别处。
+LOGO_CONFIG_FILENAME = "shctiptv_logos.json"
 
 AUTH_UA = "webkit;Resolution(PAL,720P,1080P)"
 DALVIK_UA = "Dalvik/1.6.0 (Linux; U; Android 4.4.2; HG680 Build/1.5.2)"
@@ -788,14 +800,80 @@ def raw_timeshift_catchup_url(timeshift_url: str, catchup_template: str) -> str:
     return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", query, ""))
 
 
-def rtp2httpd_live_url(raw_url: str, base_url: str) -> str:
+def parse_multicast_endpoint(raw_url: str) -> str:
+    """从原始组播地址里解析出 'ip:port' 部分，失败返回空字符串。
+
+    供各 m3u 生成函数共用，避免对拼好的 URL 做字符串替换。
+    """
     if not raw_url:
         return ""
     parsed = urllib.parse.urlparse(raw_url)
-    group = parsed.netloc or parsed.path
-    if not group or group.lower() == "null":
+    endpoint = (parsed.netloc or parsed.path).strip().lstrip("@")
+    if not endpoint or endpoint.lower() == "null":
         return ""
-    return f"{base_url.rstrip('/')}/rtp/{group}"
+    return endpoint
+
+
+def rtp2httpd_live_url(raw_url: str, base_url: str, fcc_postfix: str = "") -> str:
+    endpoint = parse_multicast_endpoint(raw_url)
+    if not endpoint:
+        return ""
+    return f"{base_url.rstrip('/')}/rtp/{endpoint}{fcc_postfix}"
+
+
+def rtp_raw_live_url(raw_url: str, fcc_postfix: str = "") -> str:
+    """裸组播播放地址：rtp://ip:port，可选拼接 FCC 后缀。"""
+    endpoint = parse_multicast_endpoint(raw_url)
+    if not endpoint:
+        return ""
+    return f"rtp://{endpoint}{fcc_postfix}"
+
+
+def load_logo_map(path: Path) -> Dict[str, str]:
+    """加载台标配置（JSON：播放源频道名 -> logo 文件名）。失败返回空表。"""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        log(f"logo 配置加载失败（{path}），将跳过台标：{exc}")
+        return {}
+    if not isinstance(data, dict):
+        log(f"logo 配置格式错误（{path}），将跳过台标")
+        return {}
+    return {str(k): str(v or "") for k, v in data.items()}
+
+
+def logo_url_for(name: str, logo_map: Dict[str, str], base_url: str) -> str:
+    """按播放源频道名查台标，返回完整 URL；没有则返回空字符串。"""
+    filename = logo_map.get(name, "")
+    if not filename:
+        return ""
+    return f"{base_url.rstrip('/')}/{filename}"
+
+
+def extinf_attrs(
+    tvg_id: str,
+    tvg_name: str,
+    group: str,
+    logo_url: str,
+    catchup_days: str,
+    catchup_url: str = "",
+) -> List[str]:
+    """拼 EXTINF 的属性部分。没有台标 / 没有回放地址时对应属性直接省略。"""
+    attrs = [
+        f'tvg-id="{tvg_id}"',
+        f'tvg-name="{tvg_name}"',
+        f'group-title="{group}"',
+    ]
+    if logo_url:
+        attrs.append(f'tvg-logo="{logo_url}"')
+    if catchup_url:
+        attrs.extend([
+            'catchup="default"',
+            f'catchup-days="{catchup_days}"',
+            f'catchup-source="{catchup_url}"',
+        ])
+    return attrs
 
 
 def rtp2httpd_rtsp_catchup_url(timeshift_url: str, base_url: str, catchup_template: str) -> str:
@@ -814,7 +892,35 @@ def rtp2httpd_rtsp_catchup_url(timeshift_url: str, base_url: str, catchup_templa
     return f"{base_url.rstrip('/')}/rtsp/{netloc}{parsed.path}?{query}"
 
 
+# 上海频道关键词（使用播放源返回的频道名）。命中任一关键词，
+# 或名字里含有“上海”/“东方”的频道，全部归入“上海”组。
+# 注：游戏风云/法治天地/金色学堂名字里不含上海、东方，故显式列出。
+SHANGHAI_KEYWORDS = (
+    "新闻综合",
+    "东方卫视",
+    "生活时尚",
+    "都市剧场",
+    "都市频道",
+    "东方影视",
+    "体育频道",
+    "第一财经",
+    "东方财经",
+    "上海教育",
+    "游戏风云",
+    "法治天地",
+    "金色学堂",
+)
+
+
+def is_shanghai_channel(name: str) -> bool:
+    if any(keyword in name for keyword in SHANGHAI_KEYWORDS):
+        return True
+    return "上海" in name or "东方" in name
+
+
 def group_for(name: str) -> str:
+    if is_shanghai_channel(name):
+        return "上海"
     if "CCTV" in name.upper() or "央视" in name:
         return "央视"
     if "卫视" in name:
@@ -836,6 +942,8 @@ def write_m3u(
     epg_url: str,
     catchup_days: str,
     catchup_template: str,
+    logo_map: Dict[str, str],
+    logo_base_url: str,
 ) -> None:
     lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U"]
     service_counts: Dict[Tuple[str, str], int] = {}
@@ -846,23 +954,12 @@ def write_m3u(
         url = stream_url(raw_url, url_mode, udpxy)
         if not url:
             continue
-        tvg_id = mix
-        tvg_name = name
         group = group_for(str(ch.get("name") or name))
         key = (group, name)
         service_counts[key] = service_counts.get(key, 0) + 1
         catchup_url = raw_timeshift_catchup_url(str(ch.get("TimeShiftURL") or ""), catchup_template)
-        attrs = [
-            f'tvg-id="{tvg_id}"',
-            f'tvg-name="{tvg_name}"',
-            f'group-title="{group}"',
-        ]
-        if catchup_url:
-            attrs.extend([
-                'catchup="default"',
-                f'catchup-days="{catchup_days}"',
-                f'catchup-source="{catchup_url}"',
-            ])
+        logo_url = logo_url_for(name, logo_map, logo_base_url)
+        attrs = extinf_attrs(mix, name, group, logo_url, catchup_days, catchup_url)
         lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
         lines.append(url)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -875,31 +972,83 @@ def write_rtp2httpd_m3u(
     base_url: str,
     catchup_days: str,
     catchup_template: str,
+    fcc_postfix: str,
+    logo_map: Dict[str, str],
+    logo_base_url: str,
+    include_catchup: bool = True,
 ) -> None:
+    """rtp2httpd 版 m3u。
+
+    include_catchup=False 时去掉全部回放信息（simp 版），
+    其余（FCC 后缀、台标、分组）与完整版一致，可长期使用。
+    """
     lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U"]
     for ch in channels:
         name = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
         mix = str(ch.get("mixNo") or "")
-        url = rtp2httpd_live_url(str(ch.get("ChannelURL") or ""), base_url)
+        url = rtp2httpd_live_url(str(ch.get("ChannelURL") or ""), base_url, fcc_postfix)
         if not url:
             continue
         group = group_for(str(ch.get("name") or name))
-        catchup_url = rtp2httpd_rtsp_catchup_url(
-            str(ch.get("TimeShiftURL") or ""),
-            base_url,
-            catchup_template,
-        )
-        attrs = [
-            f'tvg-id="{mix}"',
-            f'tvg-name="{name}"',
-            f'group-title="{group}"',
-        ]
-        if catchup_url:
-            attrs.extend([
-                'catchup="default"',
-                f'catchup-days="{catchup_days}"',
-                f'catchup-source="{catchup_url}"',
-            ])
+        catchup_url = ""
+        if include_catchup:
+            catchup_url = rtp2httpd_rtsp_catchup_url(
+                str(ch.get("TimeShiftURL") or ""),
+                base_url,
+                catchup_template,
+            )
+        logo_url = logo_url_for(name, logo_map, logo_base_url)
+        attrs = extinf_attrs(mix, name, group, logo_url, catchup_days, catchup_url)
+        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
+        lines.append(url)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_m3u_raw(
+    path: Path,
+    channels: List[Dict[str, object]],
+    epg_url: str,
+    logo_map: Dict[str, str],
+    logo_base_url: str,
+) -> None:
+    """裸组播地址版 m3u：rtp://ip:port 直连，不带回放信息。"""
+    lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U"]
+    for ch in channels:
+        name = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
+        mix = str(ch.get("mixNo") or "")
+        url = rtp_raw_live_url(str(ch.get("ChannelURL") or ""))
+        if not url:
+            continue
+        group = group_for(str(ch.get("name") or name))
+        logo_url = logo_url_for(name, logo_map, logo_base_url)
+        attrs = extinf_attrs(mix, name, group, logo_url, "")
+        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
+        lines.append(url)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_rtp2httpd_m3u_raw(
+    path: Path,
+    channels: List[Dict[str, object]],
+    epg_url: str,
+    fcc_postfix: str,
+    catchup_days: str,
+    catchup_template: str,
+    logo_map: Dict[str, str],
+    logo_base_url: str,
+) -> None:
+    """rtp2httpd 的裸地址版：rtp://ip:port 直连 + FCC 后缀，回放用 rtsp 直连地址。"""
+    lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U"]
+    for ch in channels:
+        name = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
+        mix = str(ch.get("mixNo") or "")
+        url = rtp_raw_live_url(str(ch.get("ChannelURL") or ""), fcc_postfix)
+        if not url:
+            continue
+        group = group_for(str(ch.get("name") or name))
+        catchup_url = raw_timeshift_catchup_url(str(ch.get("TimeShiftURL") or ""), catchup_template)
+        logo_url = logo_url_for(name, logo_map, logo_base_url)
+        attrs = extinf_attrs(mix, name, group, logo_url, catchup_days, catchup_url)
         lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
         lines.append(url)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -986,6 +1135,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--udpxy", default=DEFAULT_UDPXY, help="爱快/udpxy 地址，用于 shctiptv.m3u。")
     p.add_argument("--rtp2httpd-url", default=DEFAULT_RTP2HTTPD_URL, help="rtp2httpd 地址，用于 shctiptv2.m3u。")
+    p.add_argument("--fcc-postfix", default=DEFAULT_FCC_POSTFIX, help="拼到 rtp2httpd 版 m3u 播放地址后的 FCC 后缀。")
+    p.add_argument("--m3u-raw", default=M3U_RAW_FILENAME, help="裸组播地址版 m3u 的文件名。")
+    p.add_argument("--m3u-rtp2httpd-raw", default=RTP2HTTPD_RAW_M3U_FILENAME, help="rtp2httpd 裸地址版 m3u 的文件名。")
+    p.add_argument("--m3u-rtp2httpd-simp", default=RTP2HTTPD_SIMP_M3U_FILENAME, help="rtp2httpd 简版 m3u 的文件名（无回放信息）。")
+    p.add_argument("--logo-config", default=LOGO_CONFIG_FILENAME, help="台标配置文件（JSON），相对路径按脚本所在目录解析。")
+    p.add_argument("--logo-base-url", default=DEFAULT_LOGO_BASE_URL, help="台标 CDN 基础地址。")
     p.add_argument("--catchup-days", default=DEFAULT_CATCHUP_DAYS, help="写入 M3U 的 catchup-days 标记。")
     p.add_argument("--catchup-template", default=DEFAULT_CATCHUP_TEMPLATE, help="追加到 TimeShiftURL 的回放 playseek 模板。")
     p.add_argument("--epg-url", default=DEFAULT_EPG_URL, help="写入 M3U x-tvg-url 的节目单公网/内网访问地址。")
@@ -1044,8 +1199,18 @@ def main() -> int:
     if not args.skip_epg:
         programs = client.fetch_programs(merged, max(args.days_back, 0), max(args.days_forward, 0))
 
+    logo_config_path = Path(args.logo_config)
+    if not logo_config_path.is_absolute():
+        logo_config_path = SCRIPT_DIR / logo_config_path
+    logo_map = load_logo_map(logo_config_path)
+    if logo_map:
+        log(f"logo 配置已加载：{len(logo_map)} 个频道")
+
     m3u_path = output_dir / M3U_FILENAME
     rtp2httpd_m3u_path = output_dir / RTP2HTTPD_M3U_FILENAME
+    m3u_raw_path = output_dir / args.m3u_raw
+    rtp2httpd_raw_m3u_path = output_dir / args.m3u_rtp2httpd_raw
+    rtp2httpd_simp_m3u_path = output_dir / args.m3u_rtp2httpd_simp
     epg_path = output_dir / EPG_FILENAME
     write_m3u(
         m3u_path,
@@ -1055,6 +1220,15 @@ def main() -> int:
         args.epg_url,
         args.catchup_days,
         args.catchup_template,
+        logo_map,
+        args.logo_base_url,
+    )
+    write_m3u_raw(
+        m3u_raw_path,
+        merged,
+        args.epg_url,
+        logo_map,
+        args.logo_base_url,
     )
     if args.write_rtp2httpd_m3u:
         write_rtp2httpd_m3u(
@@ -1064,13 +1238,41 @@ def main() -> int:
             args.rtp2httpd_url,
             args.catchup_days,
             args.catchup_template,
+            args.fcc_postfix,
+            logo_map,
+            args.logo_base_url,
+        )
+        write_rtp2httpd_m3u_raw(
+            rtp2httpd_raw_m3u_path,
+            merged,
+            args.epg_url,
+            args.fcc_postfix,
+            args.catchup_days,
+            args.catchup_template,
+            logo_map,
+            args.logo_base_url,
+        )
+        write_rtp2httpd_m3u(
+            rtp2httpd_simp_m3u_path,
+            merged,
+            args.epg_url,
+            args.rtp2httpd_url,
+            args.catchup_days,
+            args.catchup_template,
+            args.fcc_postfix,
+            logo_map,
+            args.logo_base_url,
+            include_catchup=False,
         )
 
     write_xmltv(epg_path, merged, programs)
 
     log(f"done: {len(merged)} channels -> {m3u_path}")
+    log(f"done: {len(merged)} raw channels -> {m3u_raw_path}")
     if args.write_rtp2httpd_m3u:
         log(f"done: {len(merged)} rtp2httpd channels -> {rtp2httpd_m3u_path}")
+        log(f"done: {len(merged)} rtp2httpd raw channels -> {rtp2httpd_raw_m3u_path}")
+        log(f"done: {len(merged)} rtp2httpd simp channels -> {rtp2httpd_simp_m3u_path}")
     else:
         log("skip: rtp2httpd M3U disabled")
     log(f"done: {sum(len(v) for v in programs.values())} programmes -> {epg_path}")

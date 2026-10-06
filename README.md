@@ -77,7 +77,7 @@ python3 shctiptv_capture.py --user-id '你的账号@etv1' --sn '你的SN' --mac 
 
 ```bash
 git add README.md .gitignore shctiptv_capture.py shctiptv_logos.json
-git commit -m "Initial IPTV spider scripts"
+git commit -m "Initial IPTV capture script"
 git branch -M main
 git remote add origin https://github.com/<your-name>/<repo-name>.git
 git push -u origin main

@@ -76,7 +76,7 @@ python3 shctiptv_capture.py --user-id '你的账号@etv1' --sn '你的SN' --mac 
 发布公开仓库前，保持脚本里的账号、MAC、SN、Token 等字段为空或占位值，不要提交本地生成的 M3U、XML、缓存和抓包导出文件。
 
 ```bash
-git add README.md .gitignore shctiptv_capture.py
+git add README.md .gitignore shctiptv_capture.py shctiptv_logos.json
 git commit -m "Initial IPTV spider scripts"
 git branch -M main
 git remote add origin https://github.com/<your-name>/<repo-name>.git

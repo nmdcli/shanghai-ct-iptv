@@ -10,6 +10,8 @@
 
 脚本是单文件 Python 实现，只依赖 Python 标准库，适合放在 OpenWrt/ImmortalWrt 或内网服务器上定时运行。
 
+shctiptv_logos.json文件是用来配置每个频道logo的。需要和主脚本shctiptv_capture.py放在同一目录下。Logo均取自ihipop兄台项目的[logo地址](https://cdn.jsdelivr.net/gh/ihipop/Shanghai-IPTV@master/tv-logo/)，但不是所有的频道都有Logo文件。对于缺失logo文件的，在配置文件中留空。如果有其他logo来源的话也可以自行更改脚本里的logo来源配置。
+
 ## 脚本和输出
 
 | 地区/运营商 | 脚本 | 主要输出 |

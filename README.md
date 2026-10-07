@@ -31,7 +31,8 @@ shctiptv_rtp2httpd_simp：跟上一个文件的区别是不包括时移/回放�
 
 1. 确认运行设备能访问对应运营商 IPTV 专网。
 2. 打开对应脚本，在顶部“用户配置”或“用户可配置项”区域填写自己的账号、MAC、SN、代理地址等配置。
-3. 运行脚本：
+3. 确保shctiptv_capture.py shctiptv_logos.json shctiptv_extra_channel.json这三个文件在同一目录下。
+4. 运行脚本：
 
 ```bash
 python3 shctiptv_capture.py

@@ -57,11 +57,22 @@ DEFAULT_UDPXY = "192.168.50.10:4022"
 # rtp2httpd 地址，用于生成 shctiptv2.m3u 的直播和 RTSP 回放代理地址。
 DEFAULT_RTP2HTTPD_URL = "http://192.168.50.10:5140"
 
-# 写入 M3U 头部的节目单 URL，需要和静态文件服务地址一致。建议本机有http服务，讲脚本生成的shctepg.xml文件放进去http服务的相应目录
+# 写入 M3U 头部的节目单 URL，需要和静态文件服务地址一致。
 DEFAULT_EPG_URL = "http://192.168.50.10/iptv/shctepg.xml"
 
-# FCC地址。这只是其中一个，更多的请见 https://rtp2httpd.com/reference/cn-fcc-collection
+# 会优先使用抓取的各个频道自带的FCC地址，如果缺失就使用下面配置的这个。这只是其中一个，更多的请见 https://rtp2httpd.com/reference/cn-fcc-collection
 DEFAULT_FCC_POSTFIX = "?fcc=124.75.25.211:7777"
+
+# FCC 白名单（公开信息）。频道自带的 FCC 不在白名单内时会打 warning 日志。
+FCC_WHITELIST = (
+    "124.75.26.151:15970",
+    "124.75.25.211:7777",
+    "124.75.25.213:7777",
+    "124.75.25.214:7777",
+    "124.75.25.212:7777",
+    "124.75.25.215:7777",
+    "124.75.25.216:7777",
+)
 
 # 回放天数，只影响 M3U 的 catchup-days 标记，不改变电信平台实际可回放范围。
 DEFAULT_CATCHUP_DAYS = "7"
@@ -77,19 +88,35 @@ DEFAULT_CATCHUP_TEMPLATE = "playseek=${(b)yyyyMMddHHmmss}-${(e)yyyyMMddHHmmss}"
 # 是否生成 rtp2httpd 版 shctiptv2.m3u。默认生成；可用 --skip-rtp2httpd-m3u 关闭。
 DEFAULT_WRITE_RTP2HTTPD_M3U = True
 
-# 默认输出文件名。可以根据自己的需要变更
+# 默认输出文件名。
 M3U_FILENAME = "shctiptv.m3u"
 RTP2HTTPD_M3U_FILENAME = "shctiptv_rtp2httpd.m3u"
 M3U_RAW_FILENAME = "shctiptv_raw.m3u"
 RTP2HTTPD_SIMP_M3U_FILENAME = "shctiptv_rtp2httpd_simp.m3u"
 RTP2HTTPD_RAW_M3U_FILENAME = "shctiptv_rtp2httpd_raw.m3u"
 EPG_FILENAME = "shctepg.xml"
+# 台标人工核对清单（TSV）：编号、抓到的频道名、通用名、显示名、分组、当前台标。
+# 仅在 DEBUG_DUMP 打开时生成。
+LOGO_CHECKLIST_FILENAME = "shctiptv_logo_checklist.tsv"
 
-# 台标 CDN 基础地址，配置文件里的 logo 文件名拼在这后面。上海的台标见这个项目：https://cdn.jsdelivr.net/gh/ihipop/Shanghai-IPTV@master/tv-logo/
+# ---------------------------------------------------------------------------
+# 调试开关：为 True 时额外输出调试文件，便于以后排查问题：
+#   debug_channelarray.tsv  认证页原始频道表（编号、地址、FCC等）
+#   debug_merged.tsv        合并去重后的频道编号对照表
+#   shctiptv_logo_checklist.tsv  台标人工核对清单
+# ---------------------------------------------------------------------------
+DEBUG_DUMP = False
+DEBUG_CHANNELARRAY_TSV = "debug_channelarray.tsv"
+DEBUG_MERGED_TSV = "debug_merged.tsv"
+
+# 台标 CDN 基础地址，配置文件里的 logo 文件名拼在这后面。
 DEFAULT_LOGO_BASE_URL = "https://cdn.jsdelivr.net/gh/ihipop/Shanghai-IPTV@master/tv-logo/"
 # 台标配置文件名（JSON：{"播放源频道名": "logo文件名"}，没有 logo 的频道值留空）。
 # 相对路径时按脚本所在目录解析，可用 --logo-config 指定别处。
 LOGO_CONFIG_FILENAME = "shctiptv_logos.json"
+# 授权表里有、但EPG分类里没有的频道：组播 ip:port -> 频道名（JSON）。
+# 目前用于收录4K频道，但不限于4K，任何不在EPG里的频道都可加进来。
+EXTRA_CHANNEL_CONFIG_FILENAME = "shctiptv_extra_channel.json"
 
 AUTH_UA = "webkit;Resolution(PAL,720P,1080P)"
 DALVIK_UA = "Dalvik/1.6.0 (Linux; U; Android 4.4.2; HG680 Build/1.5.2)"
@@ -752,9 +779,29 @@ def _prefer_channel_info(new: Dict[str, object], old: Dict[str, object]) -> bool
     return False
 
 
+def load_extra_channel_map(path: Path) -> Dict[str, str]:
+    """加载额外频道映射配置（JSON：组播 ip:port -> 频道名）。
+
+    `_` 开头的键视为备注跳过。文件缺失或格式错误时返回空表（仅记录日志），
+    此时授权表有但EPG没有的频道不会被额外收进来。
+    """
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError) as exc:
+        log(f"额外频道映射配置加载失败（{path}），将跳过：{exc}")
+        return {}
+    if not isinstance(data, dict):
+        log(f"额外频道映射配置格式错误（{path}），将跳过")
+        return {}
+    return {str(k): str(v or "") for k, v in data.items()
+            if not str(k).startswith("_") and v}
+
+
 def merge_channels(
     auth_channels: List[Dict[str, str]],
     infos: List[Dict[str, object]],
+    extra_channel_map: Optional[Dict[str, str]] = None,
 ) -> List[Dict[str, object]]:
     by_mix_auth = {str(ch.get("UserChannelID") or ""): ch for ch in auth_channels}
     merged: List[Dict[str, object]] = []
@@ -770,7 +817,131 @@ def merge_channels(
         row["ChannelURL"] = auth.get("ChannelURL", "")
         row["TimeShiftURL"] = auth.get("TimeShiftURL", "")
         merged.append(row)
+    # 额外频道：授权表里有、EPG分类里没有的频道，按地址映射表收进来
+    #（目前为4K频道，但不限于4K）。它们无 EPG 名和节目单数据，
+    # 但组播/回放/FCC 数据完整，可正常播放。
+    extra_channel_map = extra_channel_map or {}
+    have_mix = {str(ch.get("mixNo") or "") for ch in merged}
+    seen_hosts = set()
+    for auth_ch in auth_channels:
+        mix = str(auth_ch.get("UserChannelID") or "")
+        if not mix or mix in have_mix:
+            continue
+        host = _stream_host(auth_ch.get("ChannelURL"))
+        name = extra_channel_map.get(host)
+        if not name:
+            continue
+        seen_hosts.add(host)
+        row = {}
+        row.update(auth_ch)
+        row["mixNo"] = mix
+        row["name"] = name
+        row["commName"] = compact_name(name)
+        row["ChannelURL"] = auth_ch.get("ChannelURL", "")
+        row["TimeShiftURL"] = auth_ch.get("TimeShiftURL", "")
+        merged.append(row)
+        log(f"extra-channel: [{mix}] {name}（无EPG，仅授权表+地址映射）")
+    for host, name in extra_channel_map.items():
+        if host not in seen_hosts:
+            log(f"warning: 额外频道映射表中的 {host}（{name}）本次未在授权表出现，映射可能已过期")
     return merged
+
+
+def _dump_debug_tsv(path: Path, columns: List[str], rows: List[Dict[str, object]]) -> None:
+    """调试：把频道编号信息写成 TSV 文本文件，便于对比排查。"""
+    lines = ["\t".join(columns)]
+    for r in rows:
+        lines.append("\t".join(str(r.get(c) or "") for c in columns))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _sort_key_by_number(value: str) -> int:
+    return int(value) if value.isdigit() else 999999
+
+
+def _stream_host(raw_url: str) -> str:
+    """取组播地址的 ip:port，用于判断是否为同一条流。"""
+    parsed = urllib.parse.urlparse(str(raw_url or ""))
+    return parsed.netloc or parsed.path
+
+
+def dedupe_same_stream(channels: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """同名且同地址的纯重复条目合并为一条（保留 HD/4K 版本，优先编号大的）。
+
+    不同地址的真变体（如标清/HD两条流）会保留，由显示名的 [编号] 前缀区分。
+    """
+    groups: Dict[str, List[Dict[str, object]]] = {}
+    for ch in channels:
+        key = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
+        groups.setdefault(key, []).append(ch)
+
+    def _score(ch: Dict[str, object]) -> Tuple[int, int, int]:
+        upper = str(ch.get("name") or "").upper()
+        marked = 1 if ("HD" in upper or "4K" in upper) else 0
+        has_catchup = 1 if str(ch.get("TimeShiftURL") or "").lower() not in ("", "null") else 0
+        mix = str(ch.get("mixNo") or "")
+        num = int(mix) if mix.isdigit() else 0
+        return (marked, has_catchup, num)
+
+    out: List[Dict[str, object]] = []
+    collapsed = 0
+    for comm, rows in groups.items():
+        by_host: Dict[str, List[Dict[str, object]]] = {}
+        for ch in rows:
+            by_host.setdefault(_stream_host(ch.get("ChannelURL")), []).append(ch)
+        for host, dupes in by_host.items():
+            if len(dupes) == 1:
+                out.append(dupes[0])
+                continue
+            best = max(dupes, key=_score)
+            out.append(best)
+            collapsed += 1
+            log(f"dedupe: [{comm}] {len(dupes)}条同地址合并，保留 mixNo={best.get('mixNo')}")
+    if collapsed:
+        log(f"dedupe: 共合并 {collapsed} 组同地址重复")
+    out.sort(key=lambda x: _sort_key_by_number(str(x.get("mixNo") or "")))
+    return out
+
+
+def enrich_channels(channels: List[Dict[str, object]]) -> None:
+    """为每个频道打 is_hd/is_4k 标记，并生成带 [编号] 前缀的显示名。"""
+    for ch in channels:
+        raw_name = str(ch.get("name") or "")
+        comm_name = str(ch.get("commName") or raw_name or ch.get("mixNo") or "")
+        mix = str(ch.get("mixNo") or "")
+        is_hd, is_4k = channel_flags(raw_name)
+        ch["is_hd"] = is_hd
+        ch["is_4k"] = is_4k
+        ch["display_name"] = display_name_for(mix, comm_name, is_hd, is_4k)
+
+
+def expand_dual_groups(channels: List[Dict[str, object]]) -> List[Dict[str, object]]:
+    """HD 双分组：原组 + 高清组；4K 双分组：原组 + 4K 组。
+
+    m3u 的 group-title 是单值，跨组展示按惯例用复制条目实现
+    （如 [101]东方卫视HD 在“上海”组和“高清”组各出现一次，
+    tvg-id 相同，EPG 匹配不受影响）。
+    """
+    out: List[Dict[str, object]] = []
+    for ch in channels:
+        out.append(ch)
+        if ch.get("is_4k"):
+            dup = dict(ch)
+            dup["group_override"] = "4K"
+            out.append(dup)
+        elif ch.get("is_hd"):
+            dup = dict(ch)
+            dup["group_override"] = "高清"
+            out.append(dup)
+    return out
+    out: List[Dict[str, object]] = []
+    for ch in channels:
+        out.append(ch)
+        if ch.get("is_hd") and not ch.get("is_4k"):
+            dup = dict(ch)
+            dup["group_override"] = "高清"
+            out.append(dup)
+    return out
 
 
 def stream_url(raw_url: str, url_mode: str, udpxy: str) -> str:
@@ -827,6 +998,21 @@ def rtp_raw_live_url(raw_url: str, fcc_postfix: str = "") -> str:
     if not endpoint:
         return ""
     return f"rtp://{endpoint}{fcc_postfix}"
+
+
+def fcc_suffix_for(ch: Dict[str, object], default_postfix: str) -> str:
+    """按频道自带的 FCC 信息拼后缀；没有则回退到默认硬编码。
+
+    自带的 FCC 不在 FCC_WHITELIST 白名单内时打 warning 日志。
+    """
+    ip = str(ch.get("ChannelFCCIP") or "").strip()
+    port = str(ch.get("ChannelFCCPort") or "").strip()
+    if ip and port:
+        pair = f"{ip}:{port}"
+        if pair not in FCC_WHITELIST:
+            log(f"warning: [{ch.get('mixNo')}] FCC {pair} 不在白名单中")
+        return f"?fcc={pair}"
+    return default_postfix
 
 
 def load_logo_map(path: Path) -> Dict[str, str]:
@@ -891,7 +1077,7 @@ def rtp2httpd_rtsp_catchup_url(timeshift_url: str, base_url: str, catchup_templa
     query = f"{parsed.query}&{seek}" if parsed.query else seek
     return f"{base_url.rstrip('/')}/rtsp/{netloc}{parsed.path}?{query}"
 
-# 专门增加了下面的逻辑来归组上海的电视频道，因为仅靠EPG节目源里获得的频道名称无法直接以某个关键字来识别上海的频道。
+
 # 上海频道关键词（使用播放源返回的频道名）。命中任一关键词，
 # 或名字里含有“上海”/“东方”的频道，全部归入“上海”组。
 # 注：游戏风云/法治天地/金色学堂名字里不含上海、东方，故显式列出。
@@ -918,19 +1104,36 @@ def is_shanghai_channel(name: str) -> bool:
     return "上海" in name or "东方" in name
 
 
+def channel_flags(raw_name: str) -> Tuple[bool, bool]:
+    """返回 (is_hd, is_4k)。高清与 HD 统一视为 1080P；名字含 4K 视为 4K。"""
+    upper = raw_name.upper()
+    is_4k = "4K" in upper
+    is_hd = (upper.endswith("HD") or "(高清)" in raw_name or "（高清）" in raw_name) and not is_4k
+    return is_hd, is_4k
+
+
+def display_name_for(mix_no: str, comm_name: str, is_hd: bool, is_4k: bool) -> str:
+    """显示名：[频道编号]基础名，HD 后缀保留以区分版本（与机顶盒习惯一致）。"""
+    base = comm_name
+    upper = base.upper()
+    if is_4k and "4K" not in upper:
+        base = f"{base}4K"
+    elif is_hd and "高清" not in base and not upper.endswith("HD"):
+        base = f"{base}HD"
+    return f"[{mix_no}]{base}"
+
+
 def group_for(name: str) -> str:
+    # 购物优先于上海（含“东方”的购物频道归入购物组）。
+    # 4K/高清走双分组复制条目，不在这里单独分组。
+    if "购物" in name:
+        return "购物"
     if is_shanghai_channel(name):
         return "上海"
     if "CCTV" in name.upper() or "央视" in name:
         return "央视"
     if "卫视" in name:
         return "卫视"
-    if "购物" in name:
-        return "购物"
-    if "4K" in name.upper():
-        return "4K"
-    if "HD" in name.upper() or "高清" in name:
-        return "高清"
     return "其他"
 
 
@@ -949,18 +1152,19 @@ def write_m3u(
     service_counts: Dict[Tuple[str, str], int] = {}
     for ch in channels:
         name = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
+        display = str(ch.get("display_name") or name)
         mix = str(ch.get("mixNo") or "")
         raw_url = str(ch.get("ChannelURL") or "")
         url = stream_url(raw_url, url_mode, udpxy)
         if not url:
             continue
-        group = group_for(str(ch.get("name") or name))
-        key = (group, name)
+        group = str(ch.get("group_override") or "") or group_for(str(ch.get("name") or name))
+        key = (group, display)
         service_counts[key] = service_counts.get(key, 0) + 1
         catchup_url = raw_timeshift_catchup_url(str(ch.get("TimeShiftURL") or ""), catchup_template)
         logo_url = logo_url_for(name, logo_map, logo_base_url)
-        attrs = extinf_attrs(mix, name, group, logo_url, catchup_days, catchup_url)
-        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
+        attrs = extinf_attrs(mix, display, group, logo_url, catchup_days, catchup_url)
+        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{display}')
         lines.append(url)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -985,11 +1189,13 @@ def write_rtp2httpd_m3u(
     lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U"]
     for ch in channels:
         name = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
+        display = str(ch.get("display_name") or name)
         mix = str(ch.get("mixNo") or "")
-        url = rtp2httpd_live_url(str(ch.get("ChannelURL") or ""), base_url, fcc_postfix)
+        fcc = fcc_suffix_for(ch, fcc_postfix)
+        url = rtp2httpd_live_url(str(ch.get("ChannelURL") or ""), base_url, fcc)
         if not url:
             continue
-        group = group_for(str(ch.get("name") or name))
+        group = str(ch.get("group_override") or "") or group_for(str(ch.get("name") or name))
         catchup_url = ""
         if include_catchup:
             catchup_url = rtp2httpd_rtsp_catchup_url(
@@ -998,8 +1204,8 @@ def write_rtp2httpd_m3u(
                 catchup_template,
             )
         logo_url = logo_url_for(name, logo_map, logo_base_url)
-        attrs = extinf_attrs(mix, name, group, logo_url, catchup_days, catchup_url)
-        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
+        attrs = extinf_attrs(mix, display, group, logo_url, catchup_days, catchup_url)
+        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{display}')
         lines.append(url)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1015,14 +1221,15 @@ def write_m3u_raw(
     lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U"]
     for ch in channels:
         name = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
+        display = str(ch.get("display_name") or name)
         mix = str(ch.get("mixNo") or "")
         url = rtp_raw_live_url(str(ch.get("ChannelURL") or ""))
         if not url:
             continue
-        group = group_for(str(ch.get("name") or name))
+        group = str(ch.get("group_override") or "") or group_for(str(ch.get("name") or name))
         logo_url = logo_url_for(name, logo_map, logo_base_url)
-        attrs = extinf_attrs(mix, name, group, logo_url, "")
-        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
+        attrs = extinf_attrs(mix, display, group, logo_url, "")
+        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{display}')
         lines.append(url)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1041,15 +1248,17 @@ def write_rtp2httpd_m3u_raw(
     lines = [f'#EXTM3U x-tvg-url="{epg_url}"' if epg_url else "#EXTM3U"]
     for ch in channels:
         name = str(ch.get("commName") or ch.get("name") or ch.get("mixNo") or "")
+        display = str(ch.get("display_name") or name)
         mix = str(ch.get("mixNo") or "")
-        url = rtp_raw_live_url(str(ch.get("ChannelURL") or ""), fcc_postfix)
+        fcc = fcc_suffix_for(ch, fcc_postfix)
+        url = rtp_raw_live_url(str(ch.get("ChannelURL") or ""), fcc)
         if not url:
             continue
-        group = group_for(str(ch.get("name") or name))
+        group = str(ch.get("group_override") or "") or group_for(str(ch.get("name") or name))
         catchup_url = raw_timeshift_catchup_url(str(ch.get("TimeShiftURL") or ""), catchup_template)
         logo_url = logo_url_for(name, logo_map, logo_base_url)
-        attrs = extinf_attrs(mix, name, group, logo_url, catchup_days, catchup_url)
-        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{name}')
+        attrs = extinf_attrs(mix, display, group, logo_url, catchup_days, catchup_url)
+        lines.append(f'#EXTINF:-1 {" ".join(attrs)},{display}')
         lines.append(url)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -1061,9 +1270,10 @@ def write_xmltv(path: Path, channels: List[Dict[str, object]], programs: Dict[st
     for ch in channels:
         mix = str(ch.get("mixNo") or "")
         name = str(ch.get("commName") or ch.get("name") or mix)
+        display = str(ch.get("display_name") or name)
         if mix:
             out.append(f'  <channel id="{xml_escape(mix)}">')
-            out.append(f'    <display-name lang="zh">{xml_escape(name)}</display-name>')
+            out.append(f'    <display-name lang="zh">{xml_escape(display)}</display-name>')
             out.append("  </channel>")
     for ch in channels:
         mix = str(ch.get("mixNo") or "")
@@ -1080,6 +1290,30 @@ def write_xmltv(path: Path, channels: List[Dict[str, object]], programs: Dict[st
             out.append("  </programme>")
     out.append("</tv>")
     path.write_text("\n".join(out) + "\n", encoding="utf-8")
+
+
+def write_logo_checklist(path: Path, channels: List[Dict[str, object]], logo_map: Dict[str, str]) -> None:
+    """台标人工核对清单：列出编号、抓到的频道原名、通用名、显示名、分组与当前台标。
+
+    台标匹配沿用通用名（去 HD/4K 后缀），如“东方卫视/东方卫视HD/东方卫视4K”
+    共用一个 logo 条目。人工核对时按“通用名”列去补 logo 配置即可。
+    """
+    cols = ["mixNo", "EPG原名", "通用名", "显示名", "分组", "清晰度", "台标文件"]
+    lines = ["\t".join(cols)]
+    for ch in channels:
+        mix = str(ch.get("mixNo") or "")
+        raw = str(ch.get("name") or "")
+        comm = str(ch.get("commName") or raw)
+        display = str(ch.get("display_name") or comm)
+        if ch.get("is_4k"):
+            quality = "4K"
+        elif ch.get("is_hd"):
+            quality = "HD"
+        else:
+            quality = ""
+        lines.append("\t".join([mix, raw, comm, display, group_for(raw or comm), quality,
+                                 logo_map.get(comm, "")]))
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def parse_categories(value: str) -> List[Tuple[str, str]]:
@@ -1140,6 +1374,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--m3u-rtp2httpd-raw", default=RTP2HTTPD_RAW_M3U_FILENAME, help="rtp2httpd 裸地址版 m3u 的文件名。")
     p.add_argument("--m3u-rtp2httpd-simp", default=RTP2HTTPD_SIMP_M3U_FILENAME, help="rtp2httpd 简版 m3u 的文件名（无回放信息）。")
     p.add_argument("--logo-config", default=LOGO_CONFIG_FILENAME, help="台标配置文件（JSON），相对路径按脚本所在目录解析。")
+    p.add_argument("--extra-channel-config", default=EXTRA_CHANNEL_CONFIG_FILENAME, help="额外频道映射配置（JSON：组播ip:port -> 频道名），相对路径按脚本所在目录解析。")
     p.add_argument("--logo-base-url", default=DEFAULT_LOGO_BASE_URL, help="台标 CDN 基础地址。")
     p.add_argument("--catchup-days", default=DEFAULT_CATCHUP_DAYS, help="写入 M3U 的 catchup-days 标记。")
     p.add_argument("--catchup-template", default=DEFAULT_CATCHUP_TEMPLATE, help="追加到 TimeShiftURL 的回放 playseek 模板。")
@@ -1190,10 +1425,34 @@ def main() -> int:
 
     client = IPTVClient(args.user_id, args.sn, args.mac, args.auth_host, ip, args.timeout)
     auth_channels = client.login()
+    if DEBUG_DUMP:
+        ca_columns = ["UserChannelID", "ChannelID", "ChannelName", "ChannelURL",
+                      "TimeShift", "TimeShiftURL", "ChannelType", "ChannelFCCIP", "ChannelFCCPort"]
+        ca_rows = [{c: ch.get(c, "") for c in ca_columns} for ch in auth_channels]
+        ca_rows.sort(key=lambda r: _sort_key_by_number(str(r["UserChannelID"])))
+        ca_path = output_dir / DEBUG_CHANNELARRAY_TSV
+        _dump_debug_tsv(ca_path, ca_columns, ca_rows)
+        log(f"debug: {len(ca_rows)} channelArray entries -> {ca_path}")
     channel_infos = client.fetch_channel_infos(parse_categories(args.categories))
-    merged = merge_channels(auth_channels, channel_infos)
+    extra_channel_path = Path(args.extra_channel_config)
+    if not extra_channel_path.is_absolute():
+        extra_channel_path = SCRIPT_DIR / extra_channel_path
+    extra_channel_map = load_extra_channel_map(extra_channel_path)
+    if extra_channel_map:
+        log(f"额外频道映射配置已加载：{len(extra_channel_map)} 个频道")
+    merged = merge_channels(auth_channels, channel_infos, extra_channel_map)
     if not merged:
         raise IPTVError("no channels fetched")
+    merged = dedupe_same_stream(merged)
+    enrich_channels(merged)
+    log(f"频道处理完成：{len(merged)} 个（含 [编号] 显示名与清晰度标记）")
+    if DEBUG_DUMP:
+        mg_columns = ["mixNo", "UserChannelID", "name", "commName", "display_name", "ChannelURL"]
+        mg_rows = [{c: ch.get(c, "") for c in mg_columns} for ch in merged]
+        mg_rows.sort(key=lambda r: _sort_key_by_number(str(r["mixNo"])))
+        mg_path = output_dir / DEBUG_MERGED_TSV
+        _dump_debug_tsv(mg_path, mg_columns, mg_rows)
+        log(f"debug: {len(mg_rows)} merged channels -> {mg_path}")
 
     programs: Dict[str, List[Dict[str, object]]] = {}
     if not args.skip_epg:
@@ -1212,9 +1471,13 @@ def main() -> int:
     rtp2httpd_raw_m3u_path = output_dir / args.m3u_rtp2httpd_raw
     rtp2httpd_simp_m3u_path = output_dir / args.m3u_rtp2httpd_simp
     epg_path = output_dir / EPG_FILENAME
+    # HD 频道双分组：原分组 + 高清组（m3u 内复制条目；xmltv 与台标清单不复制）
+    playlist_channels = expand_dual_groups(merged)
+    if len(playlist_channels) != len(merged):
+        log(f"双分组展开：{len(merged)} 个频道 -> {len(playlist_channels)} 条播放列表条目")
     write_m3u(
         m3u_path,
-        merged,
+        playlist_channels,
         args.url_mode,
         args.udpxy,
         args.epg_url,
@@ -1225,7 +1488,7 @@ def main() -> int:
     )
     write_m3u_raw(
         m3u_raw_path,
-        merged,
+        playlist_channels,
         args.epg_url,
         logo_map,
         args.logo_base_url,
@@ -1233,7 +1496,7 @@ def main() -> int:
     if args.write_rtp2httpd_m3u:
         write_rtp2httpd_m3u(
             rtp2httpd_m3u_path,
-            merged,
+            playlist_channels,
             args.epg_url,
             args.rtp2httpd_url,
             args.catchup_days,
@@ -1244,7 +1507,7 @@ def main() -> int:
         )
         write_rtp2httpd_m3u_raw(
             rtp2httpd_raw_m3u_path,
-            merged,
+            playlist_channels,
             args.epg_url,
             args.fcc_postfix,
             args.catchup_days,
@@ -1254,7 +1517,7 @@ def main() -> int:
         )
         write_rtp2httpd_m3u(
             rtp2httpd_simp_m3u_path,
-            merged,
+            playlist_channels,
             args.epg_url,
             args.rtp2httpd_url,
             args.catchup_days,
@@ -1267,12 +1530,17 @@ def main() -> int:
 
     write_xmltv(epg_path, merged, programs)
 
-    log(f"done: {len(merged)} channels -> {m3u_path}")
-    log(f"done: {len(merged)} raw channels -> {m3u_raw_path}")
+    if DEBUG_DUMP:
+        checklist_path = output_dir / LOGO_CHECKLIST_FILENAME
+        write_logo_checklist(checklist_path, merged, logo_map)
+        log(f"debug: {len(merged)} logo checklist -> {checklist_path}")
+
+    log(f"done: {len(playlist_channels)} playlist entries ({len(merged)} channels) -> {m3u_path}")
+    log(f"done: {len(playlist_channels)} raw entries -> {m3u_raw_path}")
     if args.write_rtp2httpd_m3u:
-        log(f"done: {len(merged)} rtp2httpd channels -> {rtp2httpd_m3u_path}")
-        log(f"done: {len(merged)} rtp2httpd raw channels -> {rtp2httpd_raw_m3u_path}")
-        log(f"done: {len(merged)} rtp2httpd simp channels -> {rtp2httpd_simp_m3u_path}")
+        log(f"done: {len(playlist_channels)} rtp2httpd entries -> {rtp2httpd_m3u_path}")
+        log(f"done: {len(playlist_channels)} rtp2httpd raw entries -> {rtp2httpd_raw_m3u_path}")
+        log(f"done: {len(playlist_channels)} rtp2httpd simp entries -> {rtp2httpd_simp_m3u_path}")
     else:
         log("skip: rtp2httpd M3U disabled")
     log(f"done: {sum(len(v) for v in programs.values())} programmes -> {epg_path}")
